@@ -304,6 +304,33 @@ static bool doesTopicMatchSubscription(const std::string& topic, const std::vect
     });
     return doesMatch && partIndex == topicSplit.size();
 }
+static bool doesTopicMatchSubscription(const std::vector<std::string>& topic, const std::vector<std::string>& subscription) {
+    size_t partIndex = 0;
+    bool doesMatch = true;
+    if(topic.empty())
+        return subscription.empty();
+    if((topic.at(0).at(0) == '$' && subscription.at(0).at(0) != '$') || (topic.at(0).at(0) != '$' && subscription.at(0).at(0) == '$')) {
+        return false;
+    }
+    for(auto& actualPart: topic) {
+        if(subscription.size() <= partIndex) {
+            doesMatch = false;
+            break;
+        }
+        const auto& expectedPart = subscription.at(partIndex);
+        if(actualPart == expectedPart || expectedPart == "+") {
+            partIndex += 1;
+            continue;
+        }
+        if(expectedPart == "#") {
+            partIndex = subscription.size();
+            break;
+        }
+        doesMatch = false;
+        break;
+    }
+    return doesMatch && partIndex == subscription.size();
+}
 
 inline std::vector<std::string> splitTopics(const std::string& topic) {
     std::vector<std::string> parts;
