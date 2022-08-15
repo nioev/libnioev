@@ -74,6 +74,8 @@ static inline const char* workerThreadSleepLevelToString(WorkerThreadSleepLevel 
         return "milliseconds";
     case WorkerThreadSleepLevel::TENS_OF_MILLISECONDS:
         return "tens_of_milliseconds";
+    default:
+        return "<unknown>";
     }
     assert(false);
     return "";
