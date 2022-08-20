@@ -1,5 +1,6 @@
 #pragma once
 #include <queue>
+#include <utility>
 #include <vector>
 #include <mutex>
 #include <condition_variable>
@@ -20,8 +21,8 @@ enum class GenServerEnqueueResult {
 template<typename TaskType>
 class GenServer {
 public:
-    explicit GenServer(const char* threadName)
-    : mThreadName(threadName) { }
+    explicit GenServer(std::string threadName)
+    : mThreadName(std::move(threadName)) { }
 
     virtual ~GenServer() {
         std::unique_lock<std::mutex> lock{ mTasksMutex };
@@ -31,7 +32,6 @@ public:
         mWorkerThread->join();
     }
     [[nodiscard]] virtual GenServerEnqueueResult enqueue(TaskType&& task) {
-        assert(mWorkerThread);
         std::unique_lock<std::mutex> lock{mTasksMutex};
         if(!allowEnqueue(task)) {
             return GenServerEnqueueResult::Failed;
@@ -58,27 +58,32 @@ protected:
         // LOCK MUST BE HELD HERE
         return mTasks;
     }
+    virtual void workerThreadEnter() {}
+    virtual void workerThreadLeave() {}
 private:
     void workerThreadFunc() {
-        pthread_setname_np(pthread_self(), mThreadName);
+        pthread_setname_np(pthread_self(), mThreadName.c_str());
         std::unique_lock<std::mutex> lock{mTasksMutex};
+        workerThreadEnter();
         while(true) {
-            mTasksCV.wait(lock);
-            if(!mShouldRun)
+            if(mTasks.empty())
+                mTasksCV.wait(lock);
+            if(!mShouldRun) {
+                workerThreadLeave();
                 return;
+            }
             while(!mTasks.empty()) {
                 auto pub = std::move(mTasks.front());
                 mTasks.erase(mTasks.begin());
                 handleTaskHoldingLock(lock, std::move(pub));
             }
-
         }
     }
     bool mShouldRun{true};
     std::mutex mTasksMutex;
     std::condition_variable mTasksCV;
     std::list<TaskType> mTasks;
-    const char* mThreadName;
+    std::string mThreadName;
     std::optional<std::thread> mWorkerThread;
 };
 
