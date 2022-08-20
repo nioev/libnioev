@@ -268,7 +268,7 @@ enum class IterationDecision {
 };
 
 template<typename T>
-static void splitString(const std::string& str, char delimiter, T callback) {
+static void splitString(const std::string_view& str, char delimiter, T callback) {
     std::string::size_type offset = 0, nextOffset = 0;
     do {
         nextOffset = str.find(delimiter, offset);
@@ -279,7 +279,7 @@ static void splitString(const std::string& str, char delimiter, T callback) {
     } while(nextOffset != std::string::npos);
 }
 
-static bool doesTopicMatchSubscription(const std::string& topic, const std::vector<std::string>& topicSplit) {
+static bool doesTopicMatchSubscription(const std::string_view& topic, const std::vector<std::string>& topicSplit) {
     size_t partIndex = 0;
     bool doesMatch = true;
     if((topic.at(0) == '$' && topicSplit.at(0).at(0) != '$') || (topic.at(0) != '$' && topicSplit.at(0).at(0) == '$')) {
