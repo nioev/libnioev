@@ -1,3 +1,4 @@
+#include <queue>
 #include "nioev/lib/SubscriptionTree.hpp"
 
 namespace nioev::lib {
@@ -11,7 +12,7 @@ void SubscriptionTree::addSubscription(void *subscriberId, const std::string_vie
     currentNode->subscribers.emplace(subscriberId);
 }
 
-void SubscriptionTree::removeSubscription(void *subscriberId, const std::string_view &topicFilter) {
+SubscriptionTree::RemoveSubRet SubscriptionTree::removeSubscription(void *subscriberId, const std::string_view &topicFilter) {
     TreeNode* prevNode = nullptr;
     TreeNode* currentNode = &root;
     bool found = true;
@@ -28,11 +29,13 @@ void SubscriptionTree::removeSubscription(void *subscriberId, const std::string_
         return IterationDecision::Continue;
     });
     if(!found)
-        return;
+        return RemoveSubRet::NotFound;
     currentNode->subscribers.erase(subscriberId);
     if(currentNode->subscribers.empty() && currentNode->children.empty() && prevNode) {
         prevNode->children.erase(lastPart);
+        return RemoveSubRet::DeletedLastSubFromTopic;
     }
+    return RemoveSubRet::Default;
 }
 
 void SubscriptionTree::forEveryMatch(const std::string_view &topic, std::function<void(void *)>&& callback)const {
@@ -65,7 +68,25 @@ void SubscriptionTree::forEveryMatch(const std::string_view &topic, std::functio
     }
 }
 
-void SubscriptionTree::removeAllSubscriptions(void *subscriberId) {
+bool removeAllSubsRec(void *subscriberId, SubscriptionTree::TreeNode* current, std::string currentSubPath, std::vector<std::string>& deletedSubs) {
+    current->subscribers.erase(subscriberId);
+    if(current->subscribers.empty() && current->children.empty() && !currentSubPath.empty()) {
+        deletedSubs.emplace_back(currentSubPath.substr(0, currentSubPath.size() - 1));
+        return true;
+    }
+    for(auto it = current->children.begin(); it != current->children.end();) {
+        if(removeAllSubsRec(subscriberId, &it->second, currentSubPath + it->first + "/", deletedSubs)) {
+            it = current->children.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return false;
+};
 
+std::vector<std::string> SubscriptionTree::removeAllSubscriptions(void *subscriberId) {
+    std::vector<std::string> ret;
+    removeAllSubsRec(subscriberId, &root, "", ret);
+    return ret;
 }
 }
