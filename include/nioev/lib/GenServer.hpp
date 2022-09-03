@@ -25,11 +25,7 @@ public:
     : mThreadName(std::move(threadName)) { }
 
     virtual ~GenServer() {
-        std::unique_lock<std::mutex> lock{ mTasksMutex };
-        mShouldRun = false;
-        mTasksCV.notify_all();
-        lock.unlock();
-        mWorkerThread->join();
+        stopThread();
     }
     [[nodiscard]] virtual GenServerEnqueueResult enqueue(TaskType&& task) {
         std::unique_lock<std::mutex> lock{mTasksMutex};
@@ -46,7 +42,19 @@ protected:
         return true;
     }
     void startThread() {
+        std::unique_lock<std::mutex> lock{ mTasksMutex };
         mWorkerThread.template emplace([this]{workerThreadFunc();});
+        mShouldRun = true;
+    }
+    void stopThread() {
+        std::unique_lock<std::mutex> lock{ mTasksMutex };
+        mShouldRun = false;
+        mTasksCV.notify_all();
+        lock.unlock();
+        if(!mWorkerThread)
+            return;
+        mWorkerThread->join();
+        mWorkerThread.reset();
     }
     virtual void handleTask(TaskType&&) = 0;
     virtual void handleTaskHoldingLock(std::unique_lock<std::mutex> &lock, TaskType&& task) {
@@ -76,6 +84,10 @@ private:
                 auto pub = std::move(mTasks.front());
                 mTasks.erase(mTasks.begin());
                 handleTaskHoldingLock(lock, std::move(pub));
+            }
+            if(!mShouldRun) {
+                workerThreadLeave();
+                return;
             }
         }
     }
