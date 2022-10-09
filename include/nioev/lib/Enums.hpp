@@ -206,8 +206,8 @@ static inline const char* workerThreadSleepLevelToString(WorkerThreadSleepLevel 
         return "milliseconds";
     case WorkerThreadSleepLevel::TENS_OF_MILLISECONDS:
         return "tens_of_milliseconds";
-    case WorkerThreadSleepLevel::$COUNT:
-        return "<count\?\?\?>";
+    default:
+        return "<unknown>";
     }
     assert(false);
     return "";
