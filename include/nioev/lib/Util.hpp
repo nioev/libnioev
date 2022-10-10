@@ -13,6 +13,7 @@
 #include <string_view>
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 #include "Enums.hpp"
 
@@ -137,6 +138,9 @@ private:
     uint16_t mPacketId{0};
 };*/
 
+using MQTTPropertyValue = std::variant<uint8_t, uint16_t, std::vector<uint8_t>, std::string, std::pair<std::string, std::string>, uint32_t>;
+using PropertyList = std::unordered_multimap<MQTTProperty, MQTTPropertyValue>;
+
 class BinaryEncoder {
 public:
     void encodeByte(uint8_t value) {
@@ -145,6 +149,10 @@ public:
     void encode2Bytes(uint16_t value) {
         value = htons(value);
         mData.append((uint8_t*)&value, 2);
+    }
+    void encode4Bytes(uint32_t value) {
+        value = htonl(value);
+        mData.append((uint8_t*)&value, 4);
     }
     void encodePacketId(uint16_t value) {
         encode2Bytes(value);
@@ -160,27 +168,62 @@ public:
     // this function takes about 33% of total calculation time - TODO optimize
     void insertPacketLength() {
         uint32_t packetLength = mData.size() - 1; // exluding first byte
-        int offset = 1;
+        encodeVarByteInt(packetLength, 1);
+    }
+    SharedBuffer&& moveData() {
+        return std::move(mData);
+    }
+    void encodePropertyList(const PropertyList& propertyList) {
+        auto start = mData.size();
+        for(const auto& [propId, propValue] : propertyList) {
+            encodeByte(static_cast<uint8_t>(propId));
+            switch(propertyToPropertyType(propId)) {
+            case MQTTPropertyType::Byte:
+                encodeByte(std::get<uint8_t>(propValue));
+                break;
+            case MQTTPropertyType::TwoByteInt:
+                encode2Bytes(std::get<uint16_t>(propValue));
+                break;
+            case MQTTPropertyType::VarByteInt:
+            case MQTTPropertyType::FourByteInt:
+                encode4Bytes(std::get<uint32_t>(propValue));
+                break;
+            case MQTTPropertyType::UTF8String:
+                encodeString(std::get<std::string>(propValue));
+                break;
+            case MQTTPropertyType::UTF8StringPair:
+                encodeString(std::get<std::pair<std::string, std::string>>(propValue).first);
+                encodeString(std::get<std::pair<std::string, std::string>>(propValue).second);
+                break;
+            case MQTTPropertyType::BinaryData:
+                encodeBytes(std::get<std::vector<uint8_t>>(propValue));
+                break;
+            default:
+                assert(0);
+            }
+        }
+        encodeVarByteInt(mData.size() - start, start);
+    }
+    void encodeVarByteInt(uint32_t value) {
+        encodeVarByteInt(value, mData.size());
+    }
+    void encodeVarByteInt(uint32_t value, size_t offset) {
         do {
-            uint8_t encodeByte = packetLength % 128;
-            packetLength = packetLength / 128;
+            uint8_t encodeByte = value % 128;
+            value = value / 128;
             // if there are more bytes to encode, set the upper bit
-            if(packetLength > 0) {
+            if(value > 0) {
                 encodeByte |= 128;
             }
             mData.insert(offset, &encodeByte, 1);
             offset += 1;
-        } while(packetLength > 0);
-    }
-    SharedBuffer&& moveData() {
-        return std::move(mData);
+        } while(value > 0);
+
     }
 
 private:
     SharedBuffer mData;
 };
-using MQTTPropertyValue = std::variant<uint8_t, uint16_t, std::vector<uint8_t>, std::string, std::pair<std::string, std::string>, uint32_t>;
-using PropertyList = std::vector<std::pair<MQTTProperty, MQTTPropertyValue>>;
 
 class BinaryDecoder {
 public:
@@ -232,6 +275,9 @@ public:
     const uint8_t *getCurrentPtr() {
         return mData.data() + mOffset;
     }
+    const size_t getCurrentRemainingLength() {
+        return mData.size() - mOffset;
+    }
     void advance(uint length) {
         // TODO range checks
         mOffset += length;
@@ -265,7 +311,7 @@ public:
         }
         PropertyList ret;
         uint32_t start = mOffset;
-        do {
+        while(mOffset - start < length) {
             auto property = byteToMQTTProperty(decodeByte());
             MQTTPropertyValue value;
             switch(propertyToPropertyType(property)) {
@@ -291,7 +337,8 @@ public:
                 value = std::make_pair(decodeString(), decodeString());
                 break;
             }
-        } while(mOffset - start < length);
+            ret.emplace(property, std::move(value));
+        }
         return ret;
     }
 private:
