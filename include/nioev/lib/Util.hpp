@@ -13,8 +13,12 @@
 #include <string_view>
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 #include "Enums.hpp"
+
+#include <variant>
+#include <vector>
 
 namespace nioev::lib {
 
@@ -134,6 +138,9 @@ private:
     uint16_t mPacketId{0};
 };*/
 
+using MQTTPropertyValue = std::variant<uint8_t, uint16_t, std::vector<uint8_t>, std::string, std::pair<std::string, std::string>, uint32_t>;
+using PropertyList = std::unordered_multimap<MQTTProperty, MQTTPropertyValue>;
+
 class BinaryEncoder {
 public:
     void encodeByte(uint8_t value) {
@@ -142,6 +149,10 @@ public:
     void encode2Bytes(uint16_t value) {
         value = htons(value);
         mData.append((uint8_t*)&value, 2);
+    }
+    void encode4Bytes(uint32_t value) {
+        value = htonl(value);
+        mData.append((uint8_t*)&value, 4);
     }
     void encodePacketId(uint16_t value) {
         encode2Bytes(value);
@@ -157,20 +168,57 @@ public:
     // this function takes about 33% of total calculation time - TODO optimize
     void insertPacketLength() {
         uint32_t packetLength = mData.size() - 1; // exluding first byte
-        int offset = 1;
+        encodeVarByteInt(packetLength, 1);
+    }
+    SharedBuffer&& moveData() {
+        return std::move(mData);
+    }
+    void encodePropertyList(const PropertyList& propertyList) {
+        auto start = mData.size();
+        for(const auto& [propId, propValue] : propertyList) {
+            encodeByte(static_cast<uint8_t>(propId));
+            switch(propertyToPropertyType(propId)) {
+            case MQTTPropertyType::Byte:
+                encodeByte(std::get<uint8_t>(propValue));
+                break;
+            case MQTTPropertyType::TwoByteInt:
+                encode2Bytes(std::get<uint16_t>(propValue));
+                break;
+            case MQTTPropertyType::VarByteInt:
+            case MQTTPropertyType::FourByteInt:
+                encode4Bytes(std::get<uint32_t>(propValue));
+                break;
+            case MQTTPropertyType::UTF8String:
+                encodeString(std::get<std::string>(propValue));
+                break;
+            case MQTTPropertyType::UTF8StringPair:
+                encodeString(std::get<std::pair<std::string, std::string>>(propValue).first);
+                encodeString(std::get<std::pair<std::string, std::string>>(propValue).second);
+                break;
+            case MQTTPropertyType::BinaryData:
+                encodeBytes(std::get<std::vector<uint8_t>>(propValue));
+                break;
+            default:
+                assert(0);
+            }
+        }
+        encodeVarByteInt(mData.size() - start, start);
+    }
+    void encodeVarByteInt(uint32_t value) {
+        encodeVarByteInt(value, mData.size());
+    }
+    void encodeVarByteInt(uint32_t value, size_t offset) {
         do {
-            uint8_t encodeByte = packetLength % 128;
-            packetLength = packetLength / 128;
+            uint8_t encodeByte = value % 128;
+            value = value / 128;
             // if there are more bytes to encode, set the upper bit
-            if(packetLength > 0) {
+            if(value > 0) {
                 encodeByte |= 128;
             }
             mData.insert(offset, &encodeByte, 1);
             offset += 1;
-        } while(packetLength > 0);
-    }
-    SharedBuffer&& moveData() {
-        return std::move(mData);
+        } while(value > 0);
+
     }
 
 private:
@@ -185,14 +233,18 @@ public:
     }
     std::string decodeString() {
         auto len = decode2Bytes();
-        // TODO range checks
+        if(len > mData.size() - mOffset) {
+            throw std::runtime_error{"Out of bounds string"};
+        }
         std::string ret{mData.begin() + mOffset, mData.begin() + mOffset + len};
         mOffset += len;
         return ret;
     }
     std::vector<uint8_t> decodeBytesWithPrefixLength() {
         auto len = decode2Bytes();
-        // TODO range checks
+        if(len > mData.size() - mOffset) {
+            throw std::runtime_error{"Out of bounds string bytes"};
+        }
         std::vector<uint8_t> ret{mData.begin() + mOffset, mData.begin() + mOffset + len};
         mOffset += len;
         return ret;
@@ -201,15 +253,30 @@ public:
         return mData.at(mOffset++);
     }
     uint16_t decode2Bytes() {
+        if(2 > mData.size() - mOffset) {
+            throw std::runtime_error{"Out of bounds 2 bytes decoding"};
+        }
         uint16_t len;
-        // TODO range checks
         memcpy(&len, mData.data() + mOffset, 2);
         len = ntohs(len);
         mOffset += 2;
         return len;
     }
+    uint32_t decode4Bytes() {
+        if(4 > mData.size() - mOffset) {
+            throw std::runtime_error{"Out of bounds 2 bytes decoding"};
+        }
+        uint32_t len;
+        memcpy(&len, mData.data() + mOffset, 4);
+        len = ntohl(len);
+        mOffset += 4;
+        return len;
+    }
     const uint8_t *getCurrentPtr() {
         return mData.data() + mOffset;
+    }
+    const size_t getCurrentRemainingLength() {
+        return mData.size() - mOffset;
     }
     void advance(uint length) {
         // TODO range checks
@@ -222,6 +289,57 @@ public:
     }
     bool empty() {
         return mOffset >= mUsableSize;
+    }
+    uint32_t decodeVarLengthInteger() {
+        uint32_t multiplier = 1;
+        uint32_t value = 0;
+        uint8_t encodedByte;
+        do {
+            encodedByte = decodeByte();
+            value += uint32_t(encodedByte & 127) * multiplier;
+            if(multiplier > 128 * 128 * 128) {
+                throw std::runtime_error{"Failed to decode var length"};
+            }
+            multiplier *= 128;
+        } while ((encodedByte & 128) != 0);
+        return value;
+    }
+    PropertyList decodeProperties() {
+        uint32_t length = decodeVarLengthInteger();
+        if(mOffset + length > mData.size()) {
+            throw std::runtime_error{"Not enough space for properties"};
+        }
+        PropertyList ret;
+        uint32_t start = mOffset;
+        while(mOffset - start < length) {
+            auto property = byteToMQTTProperty(decodeByte());
+            MQTTPropertyValue value;
+            switch(propertyToPropertyType(property)) {
+            case MQTTPropertyType::Byte:
+                value = decodeByte();
+                break;
+            case MQTTPropertyType::TwoByteInt:
+                value = decode2Bytes();
+                break;
+            case MQTTPropertyType::FourByteInt:
+                value = decode4Bytes();
+                break;
+            case MQTTPropertyType::VarByteInt:
+                value = decodeVarLengthInteger();
+                break;
+            case MQTTPropertyType::BinaryData:
+                value = decodeBytesWithPrefixLength();
+                break;
+            case MQTTPropertyType::UTF8String:
+                value = decodeString();
+                break;
+            case MQTTPropertyType::UTF8StringPair:
+                value = std::make_pair(decodeString(), decodeString());
+                break;
+            }
+            ret.emplace(property, std::move(value));
+        }
+        return ret;
     }
 private:
     const std::vector<uint8_t>& mData;
