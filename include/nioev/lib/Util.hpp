@@ -82,17 +82,10 @@ public:
         if(!mBuffer)
             return ret;
         ret.append(mBuffer->data(), mBuffer->size());
-        ret.mPacketId = mPacketId;
         return ret;
-    }
-    [[nodiscard]] uint16_t getPacketId() const {
-        return mPacketId;
-    }
-    void setPacketId(uint16_t id) {
-        mPacketId = id;
+
     }
 private:
-    uint16_t mPacketId{0};
     std::shared_ptr<std::vector<uint8_t>> mBuffer;
 };
 /*class SharedBuffer final {
@@ -138,8 +131,37 @@ private:
     uint16_t mPacketId{0};
 };*/
 
+struct VarByteInt {
+    uint8_t value[4] = { 0 };
+    uint8_t valueLength{0};
+};
+static inline VarByteInt encodeVarByteInt(uint32_t value) {
+    VarByteInt ret;
+    size_t offset = 0;
+    do {
+        uint8_t encodeByte = value % 128;
+        value = value / 128;
+        // if there are more bytes to encode, set the upper bit
+        if(value > 0) {
+            encodeByte |= 128;
+        }
+        memcpy(&ret.value[offset], &encodeByte, 1);
+        offset += 1;
+    } while(value > 0);
+    ret.valueLength = offset;
+    return ret;
+}
+
 using MQTTPropertyValue = std::variant<uint8_t, uint16_t, std::vector<uint8_t>, std::string, std::pair<std::string, std::string>, uint32_t>;
 using PropertyList = std::unordered_multimap<MQTTProperty, MQTTPropertyValue>;
+
+struct MQTTPacket {
+    std::string topic;
+    std::vector<uint8_t> payload;
+    QoS qos;
+    Retain retain;
+    PropertyList properties;
+};
 
 class BinaryEncoder {
 public:
@@ -154,21 +176,12 @@ public:
         value = htonl(value);
         mData.append((uint8_t*)&value, 4);
     }
-    void encodePacketId(uint16_t value) {
-        encode2Bytes(value);
-        mData.setPacketId(value);
-    }
     void encodeString(const std::string& str) {
         encode2Bytes(str.size());
         mData.append(str.c_str(), str.size());
     }
     void encodeBytes(const std::vector<uint8_t>& data) {
         mData.append(data.data(), data.size());
-    }
-    // this function takes about 33% of total calculation time - TODO optimize
-    void insertPacketLength() {
-        uint32_t packetLength = mData.size() - 1; // exluding first byte
-        encodeVarByteInt(packetLength, 1);
     }
     SharedBuffer&& moveData() {
         return std::move(mData);
@@ -204,26 +217,21 @@ public:
         }
         encodeVarByteInt(mData.size() - start, start);
     }
+    size_t size() const {
+        return mData.size();
+    }
+
+private:
     void encodeVarByteInt(uint32_t value) {
         encodeVarByteInt(value, mData.size());
     }
     void encodeVarByteInt(uint32_t value, size_t offset) {
-        do {
-            uint8_t encodeByte = value % 128;
-            value = value / 128;
-            // if there are more bytes to encode, set the upper bit
-            if(value > 0) {
-                encodeByte |= 128;
-            }
-            mData.insert(offset, &encodeByte, 1);
-            offset += 1;
-        } while(value > 0);
-
+        auto encoded = lib::encodeVarByteInt(value);
+        mData.insert(offset, encoded.value, encoded.valueLength);
     }
-
-private:
     SharedBuffer mData;
 };
+
 
 class BinaryDecoder {
 public:

@@ -36,6 +36,7 @@ public:
             currentNode = &currentNode->children.emplace(std::string{part}, TreeNode{}).first->second;
             return IterationDecision::Continue;
         });
+        currentNode->subscribers.erase(subscriberId);
         currentNode->subscribers.emplace(std::move(subscriberId));
     }
 
