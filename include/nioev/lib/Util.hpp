@@ -183,6 +183,9 @@ public:
     void encodeBytes(const std::vector<uint8_t>& data) {
         mData.append(data.data(), data.size());
     }
+    void encodeBytes(const void* data, size_t len) {
+        mData.append(data, len);
+    }
     SharedBuffer&& moveData() {
         return std::move(mData);
     }
@@ -232,6 +235,14 @@ private:
     SharedBuffer mData;
 };
 
+using PayloadType = std::string_view;
+static inline PayloadType vecToPayload(const std::vector<uint8_t>& vec) {
+    return PayloadType{(const char*)vec.data(), (const char*)vec.data() + vec.size()};
+}
+static inline std::vector<uint8_t> payloadToVec(PayloadType vec) {
+    return {vec.data(), vec.data() + vec.size()};
+
+}
 
 class BinaryDecoder {
 public:
@@ -290,8 +301,8 @@ public:
         // TODO range checks
         mOffset += length;
     }
-    std::vector<uint8_t> getRemainingBytes() {
-        std::vector<uint8_t> ret(mData.begin() + mOffset, mData.end());
+    PayloadType getRemainingBytes() {
+        PayloadType ret((const char*)mData.data() + mOffset, (const char*)mData.data() + mData.size());
         mOffset = mData.size();
         return ret;
     }
