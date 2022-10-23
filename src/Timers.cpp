@@ -3,7 +3,7 @@
 template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
 template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
-namespace nioev::mqtt {
+namespace nioev::lib {
 
 Timers::~Timers() {
     std::unique_lock<std::mutex> lock{ mTasksMutex };

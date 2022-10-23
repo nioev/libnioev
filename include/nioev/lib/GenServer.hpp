@@ -21,6 +21,13 @@ enum class GenServerEnqueueResult {
 template<typename TaskType>
 class GenServer {
 public:
+    struct DelayedTaskType {
+        std::chrono::steady_clock::time_point when;
+        TaskType task;
+        bool operator<(const DelayedTaskType& o) const {
+            return when > o.when;
+        }
+    };
     explicit GenServer(std::string threadName)
     : mThreadName(std::move(threadName)) { }
 
@@ -28,7 +35,7 @@ public:
         stopThread();
     }
     [[nodiscard]] virtual GenServerEnqueueResult enqueue(TaskType&& task) {
-        std::unique_lock<std::mutex> lock{mTasksMutex};
+        std::unique_lock<std::recursive_mutex> lock{mTasksMutex};
         if(!allowEnqueue(task)) {
             return GenServerEnqueueResult::Failed;
         }
@@ -36,18 +43,40 @@ public:
         mTasksCV.notify_all();
         return GenServerEnqueueResult::Success;
     }
+    [[nodiscard]] virtual GenServerEnqueueResult enqueueDelayed(TaskType&& task, std::chrono::milliseconds delay) {
+        auto when = std::chrono::steady_clock::now() + delay;
+        std::unique_lock<std::recursive_mutex> lock{mTasksMutex};
+        if(!allowEnqueue(task)) {
+            return GenServerEnqueueResult::Failed;
+        }
+        mDelayedTasks.emplace(DelayedTaskType{when, std::move(task)});
+        mTasksCV.notify_all();
+        return GenServerEnqueueResult::Success;
+    }
+
+    template<typename Filter>
+    void filterDelayedTasks(const Filter& filter) {
+        std::unique_lock<std::recursive_mutex> lock{mTasksMutex};
+        decltype(mDelayedTasks) newDelayedTasks;
+        while(!mDelayedTasks.empty()) {
+            if(filter(mDelayedTasks.top().task)) {
+                newDelayedTasks.emplace(mDelayedTasks.top());
+                mDelayedTasks.pop();
+            }
+        }
+    }
 
 protected:
     virtual bool allowEnqueue(const TaskType& task) {
         return true;
     }
     void startThread() {
-        std::unique_lock<std::mutex> lock{ mTasksMutex };
+        std::unique_lock<std::recursive_mutex> lock{ mTasksMutex };
         mWorkerThread.template emplace([this]{workerThreadFunc();});
         mShouldRun = true;
     }
     void stopThread() {
-        std::unique_lock<std::mutex> lock{ mTasksMutex };
+        std::unique_lock<std::recursive_mutex> lock{ mTasksMutex };
         mShouldRun = false;
         mTasksCV.notify_all();
         lock.unlock();
@@ -57,7 +86,7 @@ protected:
         mWorkerThread.reset();
     }
     virtual void handleTask(TaskType&&) = 0;
-    virtual void handleTaskHoldingLock(std::unique_lock<std::mutex> &lock, TaskType&& task) {
+    virtual void handleTaskHoldingLock(std::unique_lock<std::recursive_mutex> &lock, TaskType&& task) {
         lock.unlock();
         handleTask(std::move(task));
         lock.lock();
@@ -71,11 +100,14 @@ protected:
 private:
     void workerThreadFunc() {
         pthread_setname_np(pthread_self(), mThreadName.c_str());
-        std::unique_lock<std::mutex> lock{mTasksMutex};
+        std::unique_lock<std::recursive_mutex> lock{mTasksMutex};
         workerThreadEnter();
         while(true) {
-            if(mTasks.empty())
+            if(mDelayedTasks.empty() && mTasks.empty()) {
                 mTasksCV.wait(lock);
+            } else if(!mDelayedTasks.empty() && mTasks.empty()) {
+                mTasksCV.wait_until(lock, mDelayedTasks.top().when);
+            }
             if(!mShouldRun) {
                 workerThreadLeave();
                 return;
@@ -89,12 +121,22 @@ private:
                 workerThreadLeave();
                 return;
             }
+            while(!mDelayedTasks.empty() && mDelayedTasks.top().when <= std::chrono::steady_clock::now()) {
+                auto pub = std::move(mDelayedTasks.top().task);
+                mDelayedTasks.pop();
+                handleTaskHoldingLock(lock, std::move(pub));
+            }
+            if(!mShouldRun) {
+                workerThreadLeave();
+                return;
+            }
         }
     }
     bool mShouldRun{true};
-    std::mutex mTasksMutex;
-    std::condition_variable mTasksCV;
+    std::recursive_mutex mTasksMutex;
+    std::condition_variable_any mTasksCV;
     std::list<TaskType> mTasks;
+    std::priority_queue<DelayedTaskType> mDelayedTasks;
     std::string mThreadName;
     std::optional<std::thread> mWorkerThread;
 };
