@@ -19,6 +19,8 @@
 
 #include <variant>
 #include <vector>
+#include <string_view>
+
 
 namespace nioev::lib {
 
@@ -237,7 +239,7 @@ private:
 
 using PayloadType = std::string_view;
 static inline PayloadType vecToPayload(const std::vector<uint8_t>& vec) {
-    return PayloadType{(const char*)vec.data(), (const char*)vec.data() + vec.size()};
+    return PayloadType{(const char*)vec.data(), vec.size()};
 }
 static inline std::vector<uint8_t> payloadToVec(PayloadType vec) {
     return {vec.data(), vec.data() + vec.size()};
@@ -302,7 +304,7 @@ public:
         mOffset += length;
     }
     PayloadType getRemainingBytes() {
-        PayloadType ret((const char*)mData.data() + mOffset, (const char*)mData.data() + mData.size());
+        PayloadType ret((const char*)mData.data() + mOffset, mData.size());
         mOffset = mData.size();
         return ret;
     }

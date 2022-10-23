@@ -6,7 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <variant>
-
+#include <atomic>
 namespace nioev::mqtt {
 
 class Timers final {
